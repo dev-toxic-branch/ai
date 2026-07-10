@@ -8,10 +8,21 @@ import gradio as gr
 
 from moderation import load_all_models, moderate_ad_verbose
 
+# On ZeroGPU hardware the @spaces.GPU decorator is required for the compute
+# call; on CPU hardware (or locally) the spaces package is absent - no-op then.
+try:
+    import spaces
+
+    gpu_slice = spaces.GPU(duration=120)
+except Exception:  # noqa: BLE001
+    def gpu_slice(fn):
+        return fn
+
 print("Loading models (first startup downloads them - a few minutes)...")
 load_all_models()
 
 
+@gpu_slice
 def moderate(file_path, caption):
     if not file_path:
         return "no file", {}
