@@ -48,8 +48,9 @@ def collect_files():
 
 def warm_up():
     """Load the model and run one dummy inference so timings reflect steady state."""
-    clf = get_classifier()
+    backend, clf = get_classifier()
     clf(Image.new("RGB", (224, 224), (128, 128, 128)))
+    return backend
 
 
 def main():
@@ -66,7 +67,11 @@ def main():
         return 2
 
     print("Loading model (warm-up, not counted in latency)...")
-    warm_up()
+    backend = warm_up()
+    print(f"Backend: {backend}")
+    if backend == "skin-heuristic":
+        print("NOTE: real model not downloaded yet - using the offline skin-ratio")
+        print("      fallback. Run download_model.py to get the real classifier.")
 
     results = []
     for path, expected in cases:
