@@ -6,6 +6,8 @@ Models download from the HF hub on first startup.
 
 import spaces  # MUST be the first import on ZeroGPU (patches CUDA init)
 
+from pathlib import Path
+
 import gradio as gr
 
 from moderation import load_all_models, moderate_ad_verbose
@@ -40,13 +42,19 @@ demo = gr.Interface(
         "profanity (Whisper base). If ANY agent flags, the ad is refused. "
         "All models run locally on this Space."
     ),
+    # only offer example rows whose file actually exists on the Space
     examples=[
-        ["samples/product_ad.jpg", ""],
-        ["samples/weapon.jpg", ""],
-        ["samples/profane_overlay.jpg", ""],
-        ["samples/profane_audio.mp4", ""],
-        ["samples/landscape.jpg", "get this fucking deal"],  # caption-check demo
-    ],
+        [f, cap]
+        for f, cap in [
+            ["samples/product_ad.jpg", ""],
+            ["samples/weapon.jpg", ""],
+            ["samples/profane_overlay.jpg", ""],
+            ["samples/profane_audio.mp4", ""],
+            ["samples/landscape.jpg", "get this fucking deal"],  # caption-check demo
+        ]
+        if Path(f).is_file()
+    ]
+    or None,
     cache_examples=False,
     flagging_mode="never",
 )
