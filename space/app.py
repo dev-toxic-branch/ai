@@ -1,28 +1,20 @@
 """Hugging Face Space front-end for the 5-agent ad moderation pipeline.
 
-Runs entirely on the Space's free CPU with open-source models - no external
-LLM/vision APIs. Models download from the HF hub on first startup.
+Runs on ZeroGPU (or CPU) with open-source models only - no external APIs.
+Models download from the HF hub on first startup.
 """
+
+import spaces  # MUST be the first import on ZeroGPU (patches CUDA init)
 
 import gradio as gr
 
 from moderation import load_all_models, moderate_ad_verbose
 
-# On ZeroGPU hardware the @spaces.GPU decorator is required for the compute
-# call; on CPU hardware (or locally) the spaces package is absent - no-op then.
-try:
-    import spaces
-
-    gpu_slice = spaces.GPU(duration=120)
-except Exception:  # noqa: BLE001
-    def gpu_slice(fn):
-        return fn
-
 print("Loading models (first startup downloads them - a few minutes)...")
 load_all_models()
 
 
-@gpu_slice
+@spaces.GPU(duration=120)
 def moderate(file_path, caption):
     if not file_path:
         return "no file", {}
@@ -46,7 +38,7 @@ demo = gr.Interface(
         "Nudity (Falconsai ViT) · weapons/violence (YOLOv8n) · text-in-image "
         "profanity (TrOCR) · caption profanity (better-profanity) · spoken "
         "profanity (Whisper base). If ANY agent flags, the ad is refused. "
-        "All models run locally on this Space's CPU."
+        "All models run locally on this Space."
     ),
     examples=[
         ["samples/product_ad.jpg", ""],
@@ -59,4 +51,4 @@ demo = gr.Interface(
     flagging_mode="never",
 )
 
-demo.launch()
+demo.launch(ssr_mode=False)
