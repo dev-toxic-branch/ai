@@ -46,6 +46,16 @@ def collect_files():
     return cases
 
 
+def collect_borderline():
+    """Artistic-nudity samples: scored and shown, but policy-dependent, so they
+    do not count toward pass/fail (the Falconsai model intentionally treats
+    classical art as non-pornographic)."""
+    d = SAMPLES / "borderline_art"
+    if not d.is_dir():
+        return []
+    return [p for p in sorted(d.iterdir()) if p.suffix.lower() in SUPPORTED]
+
+
 def warm_up():
     """Load the model and run one dummy inference so timings reflect steady state."""
     backend, clf = get_classifier()
@@ -120,6 +130,18 @@ def main():
     for t in SWEEP_THRESHOLDS:
         c, fa, fr = tally(t)
         print(f"  {t:>9.2f} {100.0 * c / len(results):>8.1f}% {fa:>10} {fr:>10}")
+
+    # ---- borderline artistic nudity (informational) -----------------------
+    borderline = collect_borderline()
+    if borderline:
+        print()
+        print("Borderline artistic nudity (informational, not scored as pass/fail):")
+        for p in borderline:
+            r = moderate_ad(p, threshold=args.threshold)
+            results.append({**r, "expected": None})  # include in latency stats
+            print(f"  {r['file']:<28} {r['decision']:<8} score {r['nsfw_score']:.3f}")
+        print("  -> whether classical art belongs in ads is a policy call;")
+        print("     lower the threshold if your ad policy bans all nudity.")
 
     # ---- latency ----------------------------------------------------------
     lat = [r["latency_s"] for r in results]

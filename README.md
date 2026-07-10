@@ -34,7 +34,12 @@ python moderation.py path\to\ad_clip.mp4
   latency. Exit code 0 only if false accepts == 0.
 - `make_test_samples.py` — regenerates the test set: synthetic clean ads/clips,
   plus public-domain artistic nudes from Wikimedia Commons as safe NSFW
-  stand-ins. Drop your own files into either folder; the test picks them up.
+  stand-ins. Drop your own files into any folder; the test picks them up.
+- Test folders: `test_samples/clean/` (expected ACCEPT), `test_samples/nsfw/`
+  (expected REFUSE, counts toward false accepts), and
+  `test_samples/borderline_art/` (classical paintings the ViT model
+  intentionally treats as art, not porn — scored and printed for information,
+  but pass/fail is a policy decision, so they are not counted).
 - `download_model.py` — chunked, endlessly-retrying model downloader for
   unreliable networks. Rerunning always resumes, never restarts.
 

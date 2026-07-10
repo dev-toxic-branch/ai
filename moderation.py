@@ -25,7 +25,7 @@ from PIL import Image
 
 _LOCAL_MODEL = Path(__file__).parent / "models" / "nsfw_image_detection"
 MODEL_ID = "Falconsai/nsfw_image_detection"
-DEFAULT_THRESHOLD = 0.7
+DEFAULT_THRESHOLD = 0.6
 MAX_VIDEO_FRAMES = 8
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif"}
@@ -54,7 +54,9 @@ def get_classifier():
         if _local_model_looks_valid():
             from transformers import pipeline
 
-            _classifier = pipeline("image-classification", model=str(_LOCAL_MODEL))
+            _classifier = pipeline(
+                "image-classification", model=str(_LOCAL_MODEL), use_fast=True
+            )
             _backend = "vit-model"
         else:
             _classifier = _skin_heuristic_score
@@ -95,7 +97,7 @@ def _score_images(images):
     backend, clf = get_classifier()
     if backend == "skin-heuristic":
         return clf(images)
-    outputs = clf(images, top_k=None)
+    outputs = clf(images, top_k=None, batch_size=max(len(images), 1))
     # For a single image the pipeline returns a flat list of label dicts
     if images and isinstance(outputs[0], dict):
         outputs = [outputs]
