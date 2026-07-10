@@ -1,0 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+transformers
+ultralytics
+better-profanity
+openai-whisper
+imageio-ffmpeg
+opencv-python-headless
+numpy
+pillow
