@@ -157,7 +157,8 @@ def fetch_nsfw_samples():
     for title in NSFW_WIKI_PAGES:
         slug = title.lower().replace(" ", "_").replace("(", "").replace(")", "")
         out = NSFW / f"{slug}.jpg"
-        if out.exists():
+        # don't refetch samples that were re-triaged into borderline_art/
+        if out.exists() or (BASE / "borderline_art" / out.name).exists():
             fetched.append(out.name)
             continue
         try:
@@ -178,6 +179,72 @@ def fetch_nsfw_samples():
     return fetched, failed
 
 
+AGENTS = BASE / "agents"
+
+
+def make_agent_samples():
+    """Per-agent positives: profane overlay (OCR), profane speech (Whisper),
+    weapon photo (YOLO), corrupted file (fail-safe path)."""
+    import subprocess
+
+    from PIL import ImageFont
+
+    AGENTS.mkdir(parents=True, exist_ok=True)
+
+    # Agent 3: big clear profane text on a plain banner (TrOCR-friendly)
+    out = AGENTS / "profane_overlay.jpg"
+    if not out.exists():
+        img = Image.new("RGB", (640, 200), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("arialbd.ttf", 72)
+        except OSError:
+            font = ImageFont.load_default()
+        draw.text((30, 60), "SHIT HAPPENS", fill=(10, 10, 10), font=font)
+        img.save(out, quality=95)
+
+    # Fail-safe path: right extension, garbage bytes
+    out = AGENTS / "corrupted.jpg"
+    if not out.exists():
+        out.write_bytes(b"this is definitely not a jpeg " * 100)
+
+    # Agent 5: clean visuals + spoken profanity via Windows TTS, muxed with ffmpeg
+    out = AGENTS / "profane_audio.mp4"
+    if not out.exists():
+        from imageio_ffmpeg import get_ffmpeg_exe
+
+        wav = AGENTS / "_tts.wav"
+        script = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            f"$s.SetOutputToWaveFile('{wav}'); "
+            "$s.Speak('Buy this shit right now, it is a damn good deal'); "
+            "$s.Dispose()"
+        )
+        subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                       check=True, timeout=120)
+        subprocess.run(
+            [get_ffmpeg_exe(), "-y", "-i", str(CLEAN / "bouncing_logo.mp4"),
+             "-i", str(wav), "-c:v", "copy", "-c:a", "aac", "-shortest", str(out)],
+            check=True, capture_output=True, timeout=120,
+        )
+        wav.unlink(missing_ok=True)
+
+    # Agent 2: real handgun photo (clean product shot, no nudity) from Wikipedia
+    out = AGENTS / "weapon.jpg"
+    if not out.exists():
+        try:
+            url = _wiki_lead_image_url("Glock")
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                out.write_bytes(resp.read())
+            Image.open(out).verify()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  FAILED to fetch weapon photo: {exc}")
+            if out.exists():
+                out.unlink()
+
+
 if __name__ == "__main__":
     make_clean_images()
     make_clean_videos()
@@ -186,3 +253,5 @@ if __name__ == "__main__":
     print(f"nsfw/:  {fetched}")
     for title, err in failed:
         print(f"  FAILED to fetch '{title}': {err}")
+    make_agent_samples()
+    print(f"agents/: {sorted(p.name for p in AGENTS.iterdir())}")

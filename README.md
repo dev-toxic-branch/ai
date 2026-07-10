@@ -1,50 +1,60 @@
-# Ad Moderation — NSFW detection for ad creatives
+# Ad Content Filtration — 5 local open-source agents
 
-Moderates ad images and short video clips: returns **ACCEPT** or **REFUSE**
-with an NSFW score (0–1) and per-call latency. Built for a live demo.
+Moderates video/image ads and returns exactly `"accepted"` or `"refused"`.
+**Everything runs locally on CPU — no Claude/OpenAI/hosted APIs anywhere.**
 
-## Quick start
+| # | Check | Model | Size |
+|---|-------|-------|------|
+| 1 | Nudity | Falconsai/nsfw_image_detection (ViT) | ~330 MB |
+| 2 | Violence / weapons | Subh775/Threat-Detection-YOLOv8n (nano) | ~6 MB |
+| 3 | Text-in-image profanity | microsoft/trocr-base-printed (OCR) | ~1.3 GB |
+| 4 | Caption/metadata profanity | better-profanity wordlist | 0 (no model) |
+| 5 | Spoken profanity | openai-whisper **base** (hard-coded) | ~145 MB |
+
+If ANY agent flags, the ad is refused. Fail-safe: corrupted files or agent
+crashes also refuse (log the error, never fail open).
+
+## Setup (once)
 
 ```powershell
-# 1. (once, needs internet) fetch the real classifier — resumable, survives bad wifi
-python download_model.py
-
-# 2. run the full evaluation: results table, accuracy, threshold sweep, latency
-python test_moderation.py
-
-# 3. moderate any single file (demo command)
-python moderation.py path\to\ad_image.jpg
-python moderation.py path\to\ad_clip.mp4
+pip install --user ultralytics better-profanity openai-whisper imageio-ffmpeg
+python download_model.py     # Falconsai NSFW weights
+python download_models.py    # TrOCR + YOLO + Whisper weights (resumable, flaky-network-proof)
+python make_test_samples.py  # generate/fetch the test set
 ```
 
-## How it works
+ffmpeg comes from `imageio-ffmpeg` (bundled static binary) — no system install.
 
-- `moderation.py` — `moderate_ad(path, threshold)` scores one image/video.
-  Videos: up to 8 evenly-sampled frames, worst frame wins.
-  Two backends, picked automatically:
-  - **vit-model** — `Falconsai/nsfw_image_detection` ViT classifier, used when
-    `models/nsfw_image_detection/model.safetensors` is complete. Accurate.
-  - **skin-heuristic** — offline OpenCV skin-ratio fallback used until the
-    model is downloaded. Stopgap only: use `--threshold 0.5` with it, and
-    expect mistakes on skin-toned content (e.g. food close-ups, portraits).
-- `test_moderation.py` — runs every file in `test_samples/clean/` (expected
-  ACCEPT) and `test_samples/nsfw/` (expected REFUSE). Prints per-file results,
-  accuracy, **false accepts** (NSFW that slipped through — the error that
-  matters most), false refuses, a threshold sweep (0.5/0.6/0.7/0.8) and average
-  latency. Exit code 0 only if false accepts == 0.
-- `make_test_samples.py` — regenerates the test set: synthetic clean ads/clips,
-  plus public-domain artistic nudes from Wikimedia Commons as safe NSFW
-  stand-ins. Drop your own files into any folder; the test picks them up.
-- Test folders: `test_samples/clean/` (expected ACCEPT), `test_samples/nsfw/`
-  (expected REFUSE, counts toward false accepts), and
-  `test_samples/borderline_art/` (classical paintings the ViT model
-  intentionally treats as art, not porn — scored and printed for information,
-  but pass/fail is a policy decision, so they are not counted).
-- `download_model.py` — chunked, endlessly-retrying model downloader for
-  unreliable networks. Rerunning always resumes, never restarts.
+## Use
 
-## Picking the threshold
+```python
+from moderation import moderate_ad, moderate_ad_verbose, load_all_models
 
-Run `python test_moderation.py` and read the sweep table: choose the highest
-threshold that still gives **0 false accepts**. Pass it in the demo via
-`moderate_ad(file, threshold=...)` or `python test_moderation.py --threshold 0.6`.
+load_all_models()                     # once at app startup, prints summary
+moderate_ad("ad.mp4")                 # -> "accepted" | "refused"
+moderate_ad("poster.jpg", text="50% off!")   # caption checked too
+decision, details = moderate_ad_verbose("ad.mp4")  # details for admin dashboard:
+# details["flagged_by"], details["checks"], details["errors"], details["latency_s"]
+```
+
+Videos: 3 frames (start/middle/end) are extracted once and shared by agents
+1–3; audio is transcribed only if an audio track exists. Each agent is a lazy
+singleton, so any single agent can be demoed in isolation:
+
+```python
+from moderation import check_threat
+print(check_threat("frame.jpg"))      # loads only YOLO, nothing else
+```
+
+## Test
+
+```powershell
+python test_moderation.py   # unit test per agent + integration table + latency
+```
+
+Exit code 0 = every check passed. The table shows which agent flagged each file.
+
+Test data: `test_samples/clean/` (synthetic ads), `test_samples/nsfw/`
+(NSFW positives), `test_samples/agents/` (weapon photo, profane overlay,
+TTS profane audio, corrupted file), `test_samples/borderline_art/`
+(classical paintings — informational only, a policy call, not counted).
