@@ -80,17 +80,23 @@ def _load_threat():
 def _load_ocr():
     # trocr-BASE-printed (~1.3GB) as specified; 'small' exists but base-printed is
     # the smallest variant with reliable accuracy on clean poster/overlay text.
-    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+    from transformers import AutoImageProcessor, AutoTokenizer, VisionEncoderDecoderModel
 
     src = (
         str(TROCR_DIR)
         if (TROCR_DIR / "model.safetensors").is_file()
         else "microsoft/trocr-base-printed"  # hub fallback for cloud hosting
     )
-    processor = TrOCRProcessor.from_pretrained(src)
+    image_processor = AutoImageProcessor.from_pretrained(src)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(src)
+    except Exception:  # noqa: BLE001
+        # transformers v5 can't rebuild TrOCR's legacy tokenizer files; the
+        # decoder uses RoBERTa's exact vocab, whose repo ships modern files
+        tokenizer = AutoTokenizer.from_pretrained("FacebookAI/roberta-base")
     model = VisionEncoderDecoderModel.from_pretrained(src)
     model.eval()
-    return processor, model
+    return image_processor, tokenizer, model
 
 
 def _load_profanity():
@@ -186,12 +192,12 @@ def extract_image_text(image_path):
     """OCR the image; returns "" cleanly when no text is found."""
     import torch
 
-    processor, model = _get("ocr")
+    image_processor, tokenizer, model = _get("ocr")
     image = Image.open(image_path).convert("RGB")
-    pixel_values = processor(images=image, return_tensors="pt").pixel_values
+    pixel_values = image_processor(images=image, return_tensors="pt").pixel_values
     with torch.no_grad():
         ids = model.generate(pixel_values, max_new_tokens=32)
-    text = processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
+    text = tokenizer.batch_decode(ids, skip_special_tokens=True)[0].strip()
     # TrOCR emits lone punctuation on textless images - treat that as "no text"
     return text if any(ch.isalnum() for ch in text) else ""
 
