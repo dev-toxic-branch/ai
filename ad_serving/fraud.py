@@ -1,18 +1,34 @@
-"""Fraud detection guard - blocks bots and suspicious traffic."""
+"""Fraud detection guard with Redis sorted set sliding window.
+
+Upgraded from simple counter to Redis sorted set sliding window
+(inspired by BetterAds FraudService). Also includes campaign-wide
+velocity cap to catch botnet/proxy rotation attacks.
+"""
 
 import hashlib
 import time
+import uuid
 from collections import defaultdict
 from typing import Optional
 
 
 class FraudGuard:
-    """Real-time bot and fraud detection using heuristic rules."""
+    """Real-time bot and fraud detection.
+
+    Uses Redis sorted sets for distributed sliding window rate limiting.
+    Falls back to in-memory tracking when Redis is unavailable.
+    """
+
+    MAX_VIEWS_PER_MINUTE = 30
+    MAX_CAMPAIGN_VIEWS_PER_MINUTE = 200
+    WINDOW_SECONDS = 60
+    CAMPAIGN_WINDOW_SECONDS = 60
 
     def __init__(self, cache=None):
         self.cache = cache
         self._ip_views: dict[str, list[float]] = defaultdict(list)
         self._blocked: set[str] = set()
+        self._campaign_views: dict[str, int] = defaultdict(int)
 
     def is_bot(self, ip: str, user_agent: str) -> bool:
         if self._is_blocked(ip):
@@ -22,14 +38,42 @@ class FraudGuard:
             self._block_ip(ip)
             return True
 
-        if self._too_many_requests(ip):
+        if self._sliding_window_exceeded(ip):
             self._block_ip(ip)
             return True
 
         return False
 
+    def is_campaign_over_velocity(self, campaign_id: int) -> bool:
+        """Detect botnet attacks on a specific campaign.
+
+        Catches the pattern a per-IP window can't: many IPs each under
+        the per-IP cap, all inflating one campaign's view count.
+        """
+        if campaign_id is None:
+            return False
+
+        key = f"fraud:campaign:{campaign_id}"
+
+        if self.cache and hasattr(self.cache, "_r") and self.cache._available:
+            # Redis-backed: atomic increment with TTL
+            pipe = self.cache._r.pipeline()
+            count = pipe.incr(key)
+            pipe.expire(key, self.CAMPAIGN_WINDOW_SECONDS)
+            results = pipe.execute()
+            total = results[0]
+            return total > self.MAX_CAMPAIGN_VIEWS_PER_MINUTE
+
+        # In-memory fallback
+        now = time.time()
+        window_key = f"campaign:{campaign_id}"
+        self._campaign_views[window_key] = self._campaign_views.get(window_key, 0) + 1
+        if self._campaign_views[window_key] > self.MAX_CAMPAIGN_VIEWS_PER_MINUTE:
+            return True
+        return False
+
     def is_suspicious(self, ip: str, location: str, window_seconds: int = 300) -> bool:
-        """Detect impossible travel: same IP appearing from distant locations within a short window."""
+        """Detect impossible travel: same IP appearing from distant locations."""
         if self.cache:
             key = f"fraud:geo:{self._hash(ip)}"
             prev_loc = self.cache.get(key)
@@ -63,17 +107,27 @@ class FraudGuard:
         ]
         return any(p in ua_lower for p in bot_patterns)
 
-    def _too_many_requests(self, ip: str) -> bool:
-        now = time.time()
+    def _sliding_window_exceeded(self, ip: str) -> bool:
+        """Redis sorted set sliding window (BetterAds pattern)."""
         h = self._hash(ip)
+        key = f"fraud:ip:{h}"
 
-        if self.cache:
-            count = self.cache.incr(f"fraud:rate:{h}", ttl=60)
-            return count > 15
+        if self.cache and hasattr(self.cache, "_r") and self.cache._available:
+            now_ms = int(time.time() * 1000)
+            cutoff_ms = now_ms - (self.WINDOW_SECONDS * 1000)
 
+            r = self.cache._r
+            r.zremrangebyscore(key, 0, cutoff_ms)
+            r.zadd(key, {uuid.uuid4().hex: now_ms})
+            r.expire(key, self.WINDOW_SECONDS)
+            count = r.zcard(key)
+            return count > self.MAX_VIEWS_PER_MINUTE
+
+        # In-memory fallback
+        now = time.time()
         self._ip_views[h].append(now)
-        self._ip_views[h] = [t for t in self._ip_views[h] if now - t < 60]
-        return len(self._ip_views[h]) > 15
+        self._ip_views[h] = [t for t in self._ip_views[h] if now - t < self.WINDOW_SECONDS]
+        return len(self._ip_views[h]) > self.MAX_VIEWS_PER_MINUTE
 
     @staticmethod
     def _hash(ip: str) -> str:

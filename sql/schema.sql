@@ -15,10 +15,27 @@ CREATE TABLE IF NOT EXISTS users (
     email           VARCHAR(255) NOT NULL UNIQUE,
     name            VARCHAR(255) NOT NULL,
     password_hash   VARCHAR(255) NOT NULL,
-    role            ENUM('advertiser', 'admin') DEFAULT 'advertiser',
+    role            ENUM('advertiser', 'publisher', 'admin') DEFAULT 'advertiser',
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_email (email)
+) ENGINE=InnoDB;
+
+-- ─── Campaigns ───────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS campaigns (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    advertiser_id   BIGINT UNSIGNED NOT NULL,
+    name            VARCHAR(255) NOT NULL,
+    budget          DECIMAL(12,4) NOT NULL DEFAULT 0.0,
+    spent           DECIMAL(12,4) NOT NULL DEFAULT 0.0,
+    status          ENUM('draft', 'active', 'paused', 'completed', 'archived') DEFAULT 'draft',
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (advertiser_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_advertiser (advertiser_id),
+    INDEX idx_status (status)
 ) ENGINE=InnoDB;
 
 -- ─── Links ───────────────────────────────────────────────────────────────────
@@ -42,9 +59,12 @@ CREATE TABLE IF NOT EXISTS links (
 
 CREATE TABLE IF NOT EXISTS ads (
     id                      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    campaign_id             BIGINT UNSIGNED,
     link_id                 VARCHAR(64) NOT NULL,
     user_id                 BIGINT UNSIGNED NOT NULL,
+    title                   VARCHAR(255),
     video_url               VARCHAR(512) NOT NULL,
+    storage_key             VARCHAR(512),
     cta_text                VARCHAR(255) DEFAULT 'Learn More',
     cta_url                 VARCHAR(512) DEFAULT '#',
     category_id             INT DEFAULT 0,
@@ -60,7 +80,7 @@ CREATE TABLE IF NOT EXISTS ads (
     target_connection_types JSON,
     min_screen_width        INT DEFAULT 0,
 
-    -- budget & spend
+    -- budget & spend (per-ad budget, also has campaign-level budget)
     budget                  DECIMAL(12,4) NOT NULL DEFAULT 100.0,
     spent                   DECIMAL(12,4) NOT NULL DEFAULT 0.0,
 
@@ -77,15 +97,33 @@ CREATE TABLE IF NOT EXISTS ads (
     start_time              DOUBLE DEFAULT 0,
     end_time                DOUBLE DEFAULT 9999999999,
 
-    status                  ENUM('active', 'paused', 'rejected', 'expired') DEFAULT 'active',
+    -- lifecycle: pending -> validating -> processing -> live -> rejected
+    status                  ENUM('pending', 'validating', 'processing', 'live', 'paused', 'rejected', 'expired') DEFAULT 'pending',
+    target_locale           VARCHAR(8),
     created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
+    FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE SET NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_campaign (campaign_id),
     INDEX idx_link_id (link_id),
     INDEX idx_user (user_id),
     INDEX idx_status (status),
     INDEX idx_ab_test (ab_test_id)
+) ENGINE=InnoDB;
+
+-- ─── Ad Versions (locale-based variants) ─────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS ad_versions (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    ad_id           BIGINT UNSIGNED NOT NULL,
+    locale          VARCHAR(8) NOT NULL,
+    storage_key     VARCHAR(512) NOT NULL,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (ad_id) REFERENCES ads(id) ON DELETE CASCADE,
+    INDEX idx_ad (ad_id),
+    INDEX idx_locale (locale)
 ) ENGINE=InnoDB;
 
 -- ─── Impressions ─────────────────────────────────────────────────────────────
@@ -132,7 +170,6 @@ CREATE TABLE IF NOT EXISTS ab_variants (
     cta_url         VARCHAR(512),
     description     TEXT,
 
-    FOREIGN KEY (ab_test_id) REFERENCES ads(ab_test_id) ON DELETE CASCADE,
     UNIQUE KEY uq_ab_variant (ab_test_id, variant_index)
 ) ENGINE=InnoDB;
 
@@ -163,6 +200,26 @@ CREATE TABLE IF NOT EXISTS revenue (
     INDEX idx_type (type),
     INDEX idx_created (created_at),
     INDEX idx_daily (created_at, type)
+) ENGINE=InnoDB;
+
+-- ─── Payments ────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS payments (
+    id                      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    campaign_id             BIGINT UNSIGNED NOT NULL,
+    advertiser_id           BIGINT UNSIGNED NOT NULL,
+    stripe_payment_intent_id VARCHAR(255) NOT NULL UNIQUE,
+    client_idempotency_key  VARCHAR(255) UNIQUE,
+    amount                  DECIMAL(12,4) NOT NULL,
+    currency                VARCHAR(8) DEFAULT 'usd',
+    status                  ENUM('pending', 'succeeded', 'failed') DEFAULT 'pending',
+    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+    FOREIGN KEY (advertiser_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_campaign (campaign_id),
+    INDEX idx_status (status),
+    INDEX idx_stripe_id (stripe_payment_intent_id)
 ) ENGINE=InnoDB;
 
 -- ─── Video Processing Jobs ───────────────────────────────────────────────────

@@ -1,4 +1,8 @@
-"""API routes for ad serving, tracking, and analytics."""
+"""API routes for ad serving, tracking, and analytics.
+
+Integrates BetterAds patterns: view tokens, embed widget, locale-based
+billing, campaign management, and campaign-level analytics.
+"""
 
 import json
 import time
@@ -11,11 +15,13 @@ from ad_serving.agent import AdServingAgent
 from ad_serving.models import ImpressionRequest
 from ad_serving.db import Database
 from ad_serving.cache import Cache
+from ad_serving.billing import BillingService
+from ad_serving.ip_resolver import ClientIpResolver
 
 router = APIRouter()
 
-# Initialize agent (singleton)
 _agent: Optional[AdServingAgent] = None
+_ip_resolver = ClientIpResolver()
 
 
 def get_agent() -> AdServingAgent:
@@ -26,9 +32,7 @@ def get_agent() -> AdServingAgent:
 
 
 def _parse_ua(ua: str) -> tuple[str, str]:
-    """Parse browser and OS from user agent string."""
     ua_lower = ua.lower()
-
     browser = "other"
     if "edg" in ua_lower:
         browser = "edge"
@@ -50,7 +54,6 @@ def _parse_ua(ua: str) -> tuple[str, str]:
         os_name = "mac"
     elif "linux" in ua_lower:
         os_name = "linux"
-
     return browser, os_name
 
 
@@ -77,15 +80,17 @@ async def serve_ad(
     conn: str = Query("unknown", alias="conn"),
     sw: int = Query(0, alias="sw"),
     sh: int = Query(0, alias="sh"),
+    vt: Optional[str] = Query(None, alias="vt"),
 ):
     agent = get_agent()
     ua = request.headers.get("user-agent", "")
     browser, os_name = _parse_ua(ua)
     device = _parse_device(ua, sw)
+    ip = _ip_resolver.resolve(dict(request.headers), request.client.host)
 
     req = ImpressionRequest(
         link_id=link_id,
-        ip=request.client.host,
+        ip=ip,
         user_agent=ua,
         device=device,
         browser=browser,
@@ -98,17 +103,24 @@ async def serve_ad(
         connection_type=conn,
         screen_width=sw,
         screen_height=sh,
+        view_token=vt,
     )
 
     result = agent.serve(req)
 
     if result.get("error"):
+        if result["error"] in ("bot_detected", "campaign_velocity_exceeded"):
+            return HTMLResponse(
+                f"<html><body><h3>Ad unavailable</h3></body></html>",
+                status_code=200,
+            )
         return HTMLResponse(
             f"<html><body><h3>{result['error']}</h3></body></html>",
             status_code=200,
         )
 
     ad = result["ad"]
+    new_vt = ad.view_token or ""
 
     return HTMLResponse(f"""
 <!DOCTYPE html>
@@ -216,6 +228,72 @@ async def serve_ad(
 """)
 
 
+# ─── Embed Widget (BetterAds pattern) ────────────────────────────────────────
+
+@router.get("/embed/{token}", response_class=HTMLResponse)
+async def embed_widget(token: str, request: Request):
+    agent = get_agent()
+    db = Database()
+    row = db.fetchone("SELECT ad_id FROM ad_links WHERE token = %s", (token,))
+    if not row:
+        return HTMLResponse("<html><body><h3>Ad not found</h3></body></html>", status_code=404)
+
+    ad_id = row["ad_id"]
+    view_token = agent.view_tokens.issue_token(ad_id)
+    locale = request.query_params.get("locale", "en")
+
+    return HTMLResponse(f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ background: #000; display: flex; align-items: center;
+               justify-content: center; width: 100vw; height: 100vh; }}
+        video {{ width: 100%; height: 100%; object-fit: contain; }}
+        #error {{ color: #fff; font-family: sans-serif; font-size: 14px; }}
+    </style>
+</head>
+<body>
+    <video id="ad" autoplay muted playsinline></video>
+    <div id="error" style="display:none">Ad unavailable</div>
+    <script>
+    (function() {{
+        var adId = {ad_id};
+        var vt = '{view_token}';
+        var locale = '{locale}';
+        fetch('/api/' + adId + '?lang=' + locale + '&vt=' + encodeURIComponent(vt))
+            .then(function(r) {{ return r.ok ? r.text() : Promise.reject(r.status); }})
+            .then(function(html) {{
+                document.open();
+                document.write(html);
+                document.close();
+            }})
+            .catch(function() {{
+                document.getElementById('ad').style.display = 'none';
+                document.getElementById('error').style.display = 'block';
+            }});
+    }})();
+    </script>
+</body>
+</html>
+""")
+
+
+@router.get("/embed/{token}/snippet")
+async def embed_snippet(token: str):
+    db = Database()
+    row = db.fetchone("SELECT ad_id FROM ad_links WHERE token = %s", (token,))
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {
+        "snippet": f'<iframe src="/api/embed/{token}" width="640" height="360" frameborder="0" allow="autoplay; fullscreen" allowfullscreen></iframe>',
+        "embed_url": f"/api/embed/{token}",
+    }
+
+
 # ─── Tracking Endpoints ──────────────────────────────────────────────────────
 
 @router.get("/track/impression")
@@ -224,9 +302,9 @@ async def track_impression(ad: int, imp: int, t: Optional[str] = None):
 
 
 @router.get("/track/click")
-async def track_click(ad: int, imp: int, t: Optional[str] = None):
+async def track_click(ad: int, imp: int, t: Optional[str] = None, locale: str = "US"):
     agent = get_agent()
-    agent.track_click(ad, imp)
+    agent.track_click(ad, imp, locale)
     return Response(status_code=204)
 
 
@@ -247,11 +325,60 @@ async def track_complete(ad: int, imp: int, t: Optional[str] = None):
 @router.get("/track/skip")
 async def track_skip(ad: int, imp: int, t: Optional[str] = None):
     db = Database()
-    db.execute(
-        "UPDATE impressions SET skipped = 1 WHERE id = %s",
-        (imp,),
-    )
+    db.execute("UPDATE impressions SET skipped = 1 WHERE id = %s", (imp,))
     return Response(status_code=204)
+
+
+# ─── Campaign Endpoints ──────────────────────────────────────────────────────
+
+@router.post("/campaigns")
+async def create_campaign(body: dict):
+    db = Database()
+    campaign_id = db.execute(
+        """INSERT INTO campaigns (advertiser_id, name, budget, status)
+           VALUES (%s, %s, %s, 'draft')""",
+        (body.get("advertiser_id"), body.get("name", ""), body.get("budget", 0)),
+    )
+    return {"id": campaign_id, "status": "draft"}
+
+
+@router.get("/campaigns/{campaign_id}")
+async def get_campaign(campaign_id: int):
+    db = Database()
+    campaign = db.fetchone("SELECT * FROM campaigns WHERE id = %s", (campaign_id,))
+    if not campaign:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    billing = BillingService(db)
+    spend_info = billing.get_campaign_spend(campaign_id)
+    return {**campaign, **spend_info}
+
+
+@router.get("/campaigns/{campaign_id}/analytics")
+async def campaign_analytics(campaign_id: int):
+    db = Database()
+    stats = db.fetchone(
+        """SELECT
+            COUNT(DISTINCT i.id) as total_impressions,
+            SUM(i.clicked) as total_clicks,
+            SUM(i.completed) as total_completes,
+            SUM(i.skipped) as total_skips
+        FROM impressions i
+        JOIN ads a ON i.ad_id = a.id
+        WHERE a.campaign_id = %s""",
+        (campaign_id,),
+    )
+    revenue = db.fetchone(
+        """SELECT SUM(r.amount) as total
+           FROM revenue r
+           JOIN ads a ON r.ad_id = a.id
+           WHERE a.campaign_id = %s""",
+        (campaign_id,),
+    )
+    return {
+        "campaign_id": campaign_id,
+        "stats": stats,
+        "revenue": float(revenue["total"]) if revenue and revenue["total"] else 0.0,
+    }
 
 
 # ─── Analytics Endpoints ─────────────────────────────────────────────────────
@@ -310,7 +437,7 @@ async def top_ads(limit: int = 10):
                   (total_clicks / GREATEST(total_impressions, 1)) as ctr,
                   spent, budget
            FROM ads
-           WHERE status = 'active'
+           WHERE status = 'live'
            ORDER BY total_clicks DESC
            LIMIT %s""",
         (limit,),

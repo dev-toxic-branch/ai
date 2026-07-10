@@ -22,6 +22,7 @@ class ImpressionRequest:
     connection_type: str = "unknown"  # wifi | 4g | 3g | ethernet
     screen_width: int = 0
     screen_height: int = 0
+    view_token: Optional[str] = None  # HMAC signed one-time token
 
     @classmethod
     def from_dict(cls, data: dict) -> "ImpressionRequest":
@@ -40,6 +41,7 @@ class ImpressionRequest:
             connection_type=data.get("connection_type", "unknown"),
             screen_width=data.get("screen_width", 0),
             screen_height=data.get("screen_height", 0),
+            view_token=data.get("view_token"),
         )
 
 
@@ -53,3 +55,5 @@ class AdResponse:
     variant: Optional[str] = None
     tracking_pixel: str = ""
     score: float = 0.0
+    campaign_id: Optional[int] = None
+    view_token: Optional[str] = None

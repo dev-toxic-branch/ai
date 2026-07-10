@@ -2,12 +2,16 @@
 
 import time
 import hashlib
+from decimal import Decimal
 from unittest.mock import MagicMock, patch, PropertyMock
 from ad_serving.models import ImpressionRequest, AdResponse
 from ad_serving.fraud import FraudGuard
 from ad_serving.targeting import TargetingFilter
 from ad_serving.tracking import TrackingPixel, generate_view_hash
 from ad_serving.ctr_model import CTRPredictor
+from ad_serving.view_token import ViewTokenService
+from ad_serving.billing import BillingService, LOCALE_RATES, DEFAULT_RATE
+from ad_serving.ip_resolver import ClientIpResolver
 
 
 # ─── ImpressionRequest Tests ─────────────────────────────────────────────────
@@ -73,7 +77,7 @@ def test_fraud_bot_detection_known_bot():
 def test_fraud_rate_limiting():
     guard = FraudGuard()
     ip = "192.168.100.1"
-    for _ in range(15):
+    for _ in range(30):
         guard.is_bot(ip, "Mozilla/5.0 Chrome/120")
     assert guard.is_bot(ip, "Mozilla/5.0 Chrome/120") is True
 
@@ -299,3 +303,130 @@ def test_ad_response_defaults():
     assert resp.variant is None
     assert resp.tracking_pixel == ""
     assert resp.score == 0.0
+
+
+# ─── ViewTokenService Tests ──────────────────────────────────────────────────
+
+def test_view_token_issue_and_validate():
+    svc = ViewTokenService(secret="test-secret-key-123")
+    token = svc.issue_token(ad_id=42)
+    assert len(token) > 10
+    assert svc.validate_and_consume(token, ad_id=42) is True
+
+
+def test_view_token_reject_wrong_ad_id():
+    svc = ViewTokenService(secret="test-secret-key-123")
+    token = svc.issue_token(ad_id=42)
+    assert svc.validate_and_consume(token, ad_id=99) is False
+
+
+def test_view_token_one_time_use():
+    svc = ViewTokenService(secret="test-secret-key-123")
+    token = svc.issue_token(ad_id=42)
+    assert svc.validate_and_consume(token, ad_id=42) is True
+    assert svc.validate_and_consume(token, ad_id=42) is False  # consumed
+
+
+def test_view_token_invalid_signature():
+    svc = ViewTokenService(secret="test-secret-key-123")
+    token = svc.issue_token(ad_id=42)
+    # Tamper with the token
+    parts = token.rsplit(".", 1)
+    tampered = parts[0] + ".0000" + parts[1][4:]
+    assert svc.validate_and_consume(tampered, ad_id=42) is False
+
+
+def test_view_token_empty():
+    svc = ViewTokenService(secret="test-secret-key-123")
+    assert svc.validate_and_consume("", ad_id=42) is False
+    assert svc.validate_and_consume(None, ad_id=42) is False
+
+
+def test_view_token_malformed():
+    svc = ViewTokenService(secret="test-secret-key-123")
+    assert svc.validate_and_consume("not-a-token", ad_id=42) is False
+    assert svc.validate_and_consume("a.b", ad_id=42) is False
+
+
+def test_view_token_with_cache():
+    cache = MagicMock()
+    cache.get.return_value = None
+    cache.set.return_value = True
+    svc = ViewTokenService(secret="test-secret-key-123")
+    token = svc.issue_token(ad_id=42)
+    assert svc.validate_and_consume(token, ad_id=42, cache=cache) is True
+    cache.set.assert_called_once()
+
+
+def test_view_token_with_cache_already_used():
+    cache = MagicMock()
+    cache.get.return_value = "1"  # already used
+    svc = ViewTokenService(secret="test-secret-key-123")
+    token = svc.issue_token(ad_id=42)
+    assert svc.validate_and_consume(token, ad_id=42, cache=cache) is False
+
+
+# ─── BillingService Tests ────────────────────────────────────────────────────
+
+def test_billing_rate_us():
+    billing = BillingService()
+    assert billing.rate_for("US") == Decimal("0.0015")
+
+
+def test_billing_rate_eg_default():
+    billing = BillingService()
+    assert billing.rate_for("EG") == Decimal("0.0007")
+
+
+def test_billing_rate_unknown_locale():
+    billing = BillingService()
+    assert billing.rate_for("XX") == DEFAULT_RATE
+
+
+def test_billing_calculate_charge():
+    billing = BillingService()
+    charge = billing.calculate_charge("US", 1000)
+    assert charge == Decimal("0.0015") * 1000
+
+
+def test_billing_calculate_charge_unknown():
+    billing = BillingService()
+    charge = billing.calculate_charge("ZZ", 5000)
+    assert charge == DEFAULT_RATE * 5000
+
+
+def test_billing_locale_rates_covered():
+    assert "US" in LOCALE_RATES
+    assert "EG" in LOCALE_RATES
+    assert "JP" in LOCALE_RATES
+    assert "BR" in LOCALE_RATES
+
+
+# ─── ClientIpResolver Tests ──────────────────────────────────────────────────
+
+def test_ip_resolver_direct():
+    resolver = ClientIpResolver()
+    assert resolver.resolve({}, "1.2.3.4") == "1.2.3.4"
+
+
+def test_ip_resolver_x_forwarded_for_trusted():
+    resolver = ClientIpResolver(trusted_proxies=["10.0.0.1"])
+    headers = {"x-forwarded-for": "203.0.113.50, 10.0.0.1"}
+    assert resolver.resolve(headers, "10.0.0.1") == "203.0.113.50"
+
+
+def test_ip_resolver_x_forwarded_for_untrusted():
+    resolver = ClientIpResolver(trusted_proxies=["10.0.0.1"])
+    headers = {"x-forwarded-for": "203.0.113.50, 10.0.0.1"}
+    assert resolver.resolve(headers, "192.168.1.1") == "192.168.1.1"
+
+
+def test_ip_resolver_x_real_ip():
+    resolver = ClientIpResolver(trusted_proxies=["10.0.0.1"])
+    headers = {"x-real-ip": "203.0.113.50"}
+    assert resolver.resolve(headers, "10.0.0.1") == "203.0.113.50"
+
+
+def test_ip_resolver_no_headers():
+    resolver = ClientIpResolver()
+    assert resolver.resolve({"x-forwarded-for": "1.2.3.4"}, "5.6.7.8") == "5.6.7.8"
