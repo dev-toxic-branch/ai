@@ -1,10 +1,6 @@
 spaces
 torch
-torchvision
 transformers
-ultralytics
-imageio-ffmpeg
 opencv-python-headless
 numpy
-pillow
 tzdata

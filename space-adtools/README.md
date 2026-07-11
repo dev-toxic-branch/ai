@@ -1,6 +1,6 @@
 ---
-title: Ad AI Tools — Mobile Crop & Variant Picker
-emoji: 📱
+title: Ad Variant Picker
+emoji: 🎯
 colorFrom: green
 colorTo: blue
 sdk: gradio
@@ -9,12 +9,12 @@ pinned: false
 license: mit
 ---
 
-# 📱 Ad platform AI tools
+# 🎯 Ad variant picker
 
-- **Mobile variant** — YOLOv8-nano tracks the main subject across the video,
-  one smooth 9:16 crop, ffmpeg-scaled to 1080×1920.
-- **Pick ad variant** — filters variants by daypart (rule-based, timezone-aware)
-  then picks the best semantic match for the surrounding page text
-  (all-MiniLM-L6-v2 embeddings).
+Filters ad variants by the viewer's time of day — pass the viewer's IANA
+timezone (e.g. `Africa/Algiers`) and the daypart is computed automatically —
+then picks the best semantic match for the surrounding page text
+(all-MiniLM-L6-v2 embeddings, rule-based dayparting, open-source, CPU).
 
-API via `gradio_client`: `api_name="/mobile_variant"` and `"/pick_variant"`.
+API via `gradio_client`: `api_name="/pick_variant"` with
+(variants_json, timezone, daypart_override, surrounding_text).
