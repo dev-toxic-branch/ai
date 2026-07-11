@@ -1,0 +1,10 @@
+services:
+  ad-features:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
