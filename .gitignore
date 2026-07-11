@@ -1,4 +1,21 @@
 __pycache__/
-models/
 *.pyc
-test_samples/nsfw/Asymmetrical-Boobs1-896x1024.webp
+*.pyo
+models/
+translator/
+
+# Media / test outputs
+*.mp4
+*.mp3
+*.avi
+*.mov
+*.mkv
+*.webm
+*.wav
+
+# Test output text files
+test_output.txt
+test_translation.txt
+test_dubbed.txt
+deep_sea_*.txt
+deep_sea_french_dubbed.txt

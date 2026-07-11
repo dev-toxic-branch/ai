@@ -12,37 +12,43 @@ Run:
     # or directly:  uvicorn server:app --host 0.0.0.0 --port 8000
 """
 
+import logging
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import ad_features
+
+log = logging.getLogger("ad_server")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("Warming YOLOv8n...")
+    t0 = time.perf_counter()
+    ad_features._get_yolo()
+    log.info("YOLOv8n ready in %.1fs", time.perf_counter() - t0)
+
+    log.info("Warming MiniLM-L6-v2...")
+    t0 = time.perf_counter()
+    ad_features._get_embedder()
+    log.info("MiniLM-L6-v2 ready in %.1fs", time.perf_counter() - t0)
+
+    yield
+
 
 app = FastAPI(
     title="Ad Features API",
     description="Local ad feature engine — mobile crop, dayparting, embedding matching.",
     version="1.0.0",
+    lifespan=lifespan,
 )
-
-# ---------------------------------------------------------------------------
-# Startup: eager-load YOLO + MiniLM so first request isn't slow
-# ---------------------------------------------------------------------------
-@app.on_event("startup")
-def _warm_models():
-    print("Warming YOLOv8n...")
-    t0 = time.perf_counter()
-    ad_features._get_yolo()
-    print(f"  YOLOv8n ready in {time.perf_counter() - t0:.1f}s")
-
-    print("Warming MiniLM-L6-v2...")
-    t0 = time.perf_counter()
-    ad_features._get_embedder()
-    print(f"  MiniLM-L6-v2 ready in {time.perf_counter() - t0:.1f}s")
 
 
 # ---------------------------------------------------------------------------

@@ -10,10 +10,10 @@ WORKDIR /app
 COPY requirements-server.txt .
 RUN pip install --no-cache-dir -r requirements-server.txt
 
-COPY ad_features.py download_models.py download_model.py server.py ./
+COPY ad_features.py download_models.py server.py ./
 COPY models/ ./models/
 
-# Download any missing model weights (resumable, idempotent)
+# Download any missing ad_features model weights (yolov8n + minilm)
 RUN python download_models.py || true
 
 EXPOSE 8000
