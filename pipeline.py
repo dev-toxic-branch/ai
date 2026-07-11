@@ -72,10 +72,83 @@ def transcribe_audio(video_path):
     return result["text"].strip()
 
 
-def run_dubbing_pipeline(video_path, output_path, target_lang="fr"):
-    """Full pipeline: transcribe -> translate -> (optionally) synthesize.
+def text_to_speech(text, output_path, lang="fr"):
+    """Generate speech audio from text using edge-tts."""
+    import asyncio
+    import edge_tts
 
-    For now, returns translated text. TTS synthesis can be added later.
+    voice_map = {
+        "fr": "fr-FR-DeniseNeural",
+        "en": "en-US-JennyNeural",
+        "es": "es-ES-ElviraNeural",
+        "de": "de-DE-KatjaNeural",
+        "ar": "ar-SA-ZariyahNeural",
+    }
+    voice = voice_map.get(lang, f"{lang}-{lang.upper()}-FemaleNeural")
+
+    async def _generate():
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(str(output_path))
+
+    asyncio.run(_generate())
+    return output_path
+
+
+def has_video_stream(file_path):
+    """Check if file has a video stream."""
+    from moderation import _ffmpeg_exe
+
+    probe = subprocess.run(
+        [_ffmpeg_exe(), "-i", str(file_path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    return "Video:" in probe.stderr
+
+
+def replace_audio(video_path, audio_path, output_path):
+    """Replace video's audio track with new audio using ffmpeg."""
+    from moderation import _ffmpeg_exe
+
+    # First convert TTS audio to wav format compatible with video
+    with tempfile.TemporaryDirectory() as td:
+        wav_audio = Path(td) / "audio.wav"
+        subprocess.run(
+            [_ffmpeg_exe(), "-y", "-i", str(audio_path),
+             "-ar", "44100", "-ac", "2", "-f", "wav", str(wav_audio)],
+            capture_output=True, timeout=120, check=True,
+        )
+
+        # Check if input has video stream
+        if has_video_stream(video_path):
+            # Has video - replace audio track
+            cmd = [
+                _ffmpeg_exe(), "-y",
+                "-i", str(video_path),
+                "-i", str(wav_audio),
+                "-c:v", "copy",
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-shortest",
+                "-loglevel", "error",
+                str(output_path),
+            ]
+        else:
+            # Audio-only - just copy the translated audio
+            cmd = [
+                _ffmpeg_exe(), "-y",
+                "-i", str(wav_audio),
+                "-c:a", "libmp3lame", "-q:a", "2",
+                str(output_path),
+            ]
+
+        subprocess.run(cmd, capture_output=True, timeout=300, check=True)
+
+    return output_path
+
+
+def run_dubbing_pipeline(video_path, output_path, target_lang="fr"):
+    """Full pipeline: transcribe -> translate -> TTS -> dubbed video.
+
+    Returns the path to the dubbed video file.
     """
     config = {"target_lang": target_lang}
 
@@ -89,12 +162,24 @@ def run_dubbing_pipeline(video_path, output_path, target_lang="fr"):
     translated = translate_segments(transcript, config)
     print(f"Translation: {translated[:200]}...")
 
-    # Step 3: Save result
-    output = Path(output_path)
-    output.write_text(
+    # Step 3: Generate French speech
+    print("Generating French audio...")
+    with tempfile.TemporaryDirectory() as td:
+        tts_audio = Path(td) / "french_speech.mp3"
+        text_to_speech(translated, tts_audio, lang=target_lang)
+        print(f"TTS audio generated: {tts_audio}")
+
+        # Step 4: Replace video audio
+        print("Creating dubbed video...")
+        output = Path(output_path)
+        replace_audio(video_path, tts_audio, output)
+        print(f"Dubbed video saved to: {output}")
+
+    # Also save text translation
+    txt_output = Path(str(output_path).rsplit(".", 1)[0] + ".txt")
+    txt_output.write_text(
         f"Original: {transcript}\n\nTranslated ({target_lang}): {translated}",
         encoding="utf-8",
     )
-    print(f"Saved to: {output}")
 
-    return translated
+    return str(output)
