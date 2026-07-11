@@ -28,8 +28,18 @@ WHISPER_BASE = (
     "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt"
 )
 
+MINILM = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/"
+YOLO_GENERAL = "https://huggingface.co/Ultralytics/YOLOv8/resolve/main/yolov8n.pt"
+
 # Ordered smallest-first so the quick wins land early; the 1.3GB OCR model last.
 TARGETS = [
+    (YOLO_GENERAL, BASE_DIR / "models/yolov8n/yolov8n.pt"),
+    (MINILM + "config.json", BASE_DIR / "models/minilm/config.json"),
+    (MINILM + "tokenizer_config.json", BASE_DIR / "models/minilm/tokenizer_config.json"),
+    (MINILM + "special_tokens_map.json", BASE_DIR / "models/minilm/special_tokens_map.json"),
+    (MINILM + "vocab.txt", BASE_DIR / "models/minilm/vocab.txt"),
+    (MINILM + "tokenizer.json", BASE_DIR / "models/minilm/tokenizer.json"),
+    (MINILM + "model.safetensors", BASE_DIR / "models/minilm/model.safetensors"),
     (YOLO + "weights/best.pt", BASE_DIR / "models/threat_yolov8n/best.pt"),
     (WHISPER_BASE, Path.home() / ".cache/whisper/base.pt"),
     (TROCR + "config.json", BASE_DIR / "models/trocr_base_printed/config.json"),
