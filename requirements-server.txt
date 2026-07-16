@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+ultralytics
+torch --index-url https://download.pytorch.org/whl/cpu
+transformers
+opencv-python-headless
+numpy
+imageio-ffmpeg

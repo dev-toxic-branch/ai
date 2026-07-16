@@ -1,0 +1,13 @@
+spaces
+torch
+torchvision
+transformers
+sentencepiece
+protobuf
+ultralytics
+better-profanity
+openai-whisper
+imageio-ffmpeg
+opencv-python-headless
+numpy
+pillow

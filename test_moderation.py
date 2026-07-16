@@ -1,141 +1,147 @@
-"""Evaluate moderate_ad() against the labelled test set in test_samples/.
+"""Test suite for the 5-agent ad moderation pipeline.
 
-- Runs every file in test_samples/clean/ (expected ACCEPT) and
-  test_samples/nsfw/ (expected REFUSE).
-- Prints a per-file results table, then a summary with accuracy,
-  false accepts (NSFW that slipped through - the dangerous error) and
-  false refuses (clean content wrongly blocked).
-- Sweeps several thresholds so the best one can be picked with data.
-  Scores are threshold-independent, so inference runs once and the sweep
-  just re-applies each cutoff.
-- Times every moderate_ad() call (model load excluded via a warm-up call)
-  and reports average latency.
+Part 1 - isolated unit test per agent (each agent callable on its own).
+Part 2 - integration tests through moderate_ad(): every scenario from the spec,
+         with a results table showing which agent flagged each file.
+Part 3 - per-agent average latency + end-to-end time per file.
 
-Exit code 0 (PASS) iff there are zero false accepts at the chosen threshold.
+Exit code 0 only if every test passes.
 """
 
-import argparse
 import statistics
 import sys
+import time
 from pathlib import Path
 
-from PIL import Image
-
 from moderation import (
-    DEFAULT_THRESHOLD,
-    IMAGE_EXTS,
-    VIDEO_EXTS,
-    get_classifier,
-    moderate_ad,
+    check_nudity,
+    check_speech_profanity,
+    check_text_profanity,
+    check_threat,
+    extract_image_text,
+    has_audio_track,
+    load_all_models,
+    moderate_ad_verbose,
 )
 
 SAMPLES = Path(__file__).parent / "test_samples"
-SWEEP_THRESHOLDS = [0.5, 0.6, 0.7, 0.8]
-SUPPORTED = IMAGE_EXTS | VIDEO_EXTS
+CLEAN = SAMPLES / "clean"
+NSFW = SAMPLES / "nsfw"
+AGENTS = SAMPLES / "agents"
+
+agent_latency = {}  # agent name -> list of seconds
 
 
-def collect_files():
-    cases = []  # (path, expected_decision)
-    for folder, expected in [("clean", "ACCEPT"), ("nsfw", "REFUSE")]:
-        d = SAMPLES / folder
-        if not d.is_dir():
-            continue
-        for p in sorted(d.iterdir()):
-            if p.suffix.lower() in SUPPORTED:
-                cases.append((p, expected))
-    return cases
+def timed(agent, fn, *args):
+    t0 = time.perf_counter()
+    out = fn(*args)
+    agent_latency.setdefault(agent, []).append(time.perf_counter() - t0)
+    return out
 
 
-def warm_up():
-    """Load the model and run one dummy inference so timings reflect steady state."""
-    clf = get_classifier()
-    clf(Image.new("RGB", (224, 224), (128, 128, 128)))
+def nudity_sample():
+    """A real NSFW-positive image from test_samples/nsfw/."""
+    for p in sorted(NSFW.iterdir()):
+        if p.suffix.lower() in {".webp", ".jpg", ".jpeg", ".png"} and "README" not in p.name:
+            best = p
+            if p.suffix.lower() == ".webp":  # the photographic sample, strongest positive
+                return p
+    return best
+
+
+# ---------------------------------------------------------------------------
+# Part 1: one isolated test per agent
+# ---------------------------------------------------------------------------
+def unit_tests():
+    rows = []
+
+    def check(name, ok, detail=""):
+        rows.append((name, ok, detail))
+
+    flagged, score = timed("1 nudity", check_nudity, CLEAN / "landscape.jpg")
+    check("A1 nudity: clean image not flagged", not flagged, f"score={score:.3f}")
+    flagged, score = timed("1 nudity", check_nudity, nudity_sample())
+    check("A1 nudity: nsfw image flagged", flagged, f"score={score:.3f}")
+
+    flagged, conf, classes = timed("2 threat", check_threat, CLEAN / "landscape.jpg")
+    check("A2 threat: clean image not flagged", not flagged, f"classes={classes}")
+    weapon = AGENTS / "weapon.jpg"
+    if weapon.exists():
+        flagged, conf, classes = timed("2 threat", check_threat, weapon)
+        check("A2 threat: weapon photo flagged", flagged, f"conf={conf:.2f} classes={classes}")
+    else:
+        check("A2 threat: weapon photo flagged", False, "weapon.jpg missing - rerun make_test_samples.py")
+
+    text = timed("3 ocr", extract_image_text, AGENTS / "profane_overlay.jpg")
+    check("A3 ocr: reads overlay text", "shit" in text.lower(), f"read={text!r}")
+    text = timed("3 ocr", extract_image_text, CLEAN / "landscape.jpg")
+    check("A3 ocr: textless image handled", isinstance(text, str), f"read={text!r}")
+
+    check("A4 profanity: catches swear", timed("4 text", check_text_profanity, "what the fuck"), "")
+    check("A4 profanity: clean text passes", not timed("4 text", check_text_profanity, "family picnic day"), "")
+    check("A4 profanity: None-safe", not check_text_profanity(None), "")
+
+    check("A5 speech: detects no-audio track", not has_audio_track(CLEAN / "bouncing_logo.mp4"), "")
+    check("A5 speech: detects audio track", has_audio_track(AGENTS / "profane_audio.mp4"), "")
+    flagged, transcript = timed("5 speech", check_speech_profanity, AGENTS / "profane_audio.mp4")
+    check("A5 speech: profane audio flagged", flagged, f"transcript={transcript!r}")
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Part 2: integration through moderate_ad()
+# ---------------------------------------------------------------------------
+def integration_cases():
+    return [
+        # (test name, file, text, expected decision, agent expected to flag or None)
+        ("clean image, no text", CLEAN / "product_ad.jpg", None, "accepted", None),
+        ("clean video, no text", CLEAN / "color_fade_banner.mp4", None, "accepted", None),
+        ("nudity image", nudity_sample(), None, "refused", "nudity"),
+        ("weapon visible, no nudity", AGENTS / "weapon.jpg", None, "refused", "threat"),
+        ("profane text overlaid on image", AGENTS / "profane_overlay.jpg", None, "refused", "ocr_profanity"),
+        ("profane ad caption", CLEAN / "landscape.jpg", "get this fucking deal", "refused", "text_profanity"),
+        ("profane spoken audio", AGENTS / "profane_audio.mp4", None, "refused", "speech_profanity"),
+        ("corrupted file", AGENTS / "corrupted.jpg", None, "refused", "unreadable_file"),
+    ]
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--threshold", type=float, default=DEFAULT_THRESHOLD,
-        help=f"decision threshold for the PASS/FAIL verdict (default {DEFAULT_THRESHOLD})",
-    )
-    args = parser.parse_args()
+    print("=" * 76)
+    load_all_models()
 
-    cases = collect_files()
-    if not cases:
-        print(f"No test files found under {SAMPLES}. Run make_test_samples.py first.")
-        return 2
-
-    print("Loading model (warm-up, not counted in latency)...")
-    warm_up()
-
-    results = []
-    for path, expected in cases:
-        try:
-            r = moderate_ad(path, threshold=args.threshold)
-        except Exception as exc:  # noqa: BLE001 - a broken file counts as a failure
-            print(f"ERROR moderating {path.name}: {exc}")
-            return 2
-        r["expected"] = expected
-        results.append(r)
-
-    # ---- per-file table -------------------------------------------------
     print()
-    header = f"{'filename':<28} {'type':<6} {'expected':<8} {'actual':<8} {'score':>6} {'ms':>7}  result"
+    print("PART 1 - isolated agent tests")
+    print("-" * 76)
+    all_ok = True
+    for name, ok, detail in unit_tests():
+        all_ok &= ok
+        print(f"  {'pass' if ok else 'FAIL':<5} {name:<44} {detail}")
+
+    print()
+    print("PART 2 - integration via moderate_ad()")
+    header = f"{'test':<34} {'expected':<9} {'actual':<9} {'flagged by':<28} {'sec':>5}  result"
     print(header)
     print("-" * len(header))
-    for r in results:
-        ok = r["decision"] == r["expected"]
-        print(
-            f"{r['file']:<28} {r['media_type']:<6} {r['expected']:<8} "
-            f"{r['decision']:<8} {r['nsfw_score']:>6.3f} {r['latency_s'] * 1000:>7.0f}  "
-            f"{'pass' if ok else 'FAIL'}"
-        )
-
-    # ---- summary at chosen threshold ------------------------------------
-    def tally(threshold):
-        fa = sum(1 for r in results if r["expected"] == "REFUSE" and r["nsfw_score"] < threshold)
-        fr = sum(1 for r in results if r["expected"] == "ACCEPT" and r["nsfw_score"] >= threshold)
-        correct = len(results) - fa - fr
-        return correct, fa, fr
-
-    correct, false_accepts, false_refuses = tally(args.threshold)
-    accuracy = 100.0 * correct / len(results)
+    for name, path, text, expected, expect_agent in integration_cases():
+        decision, details = moderate_ad_verbose(path, text=text)
+        ok = decision == expected
+        if ok and expect_agent is not None:
+            ok = expect_agent in details["flagged_by"]
+        all_ok &= ok
+        flagged = ",".join(details["flagged_by"]) or "-"
+        print(f"{name:<34} {expected:<9} {decision:<9} {flagged:<28} "
+              f"{details['latency_s']:>5.1f}  {'pass' if ok else 'FAIL'}")
 
     print()
-    print(f"Summary @ threshold {args.threshold}:")
-    print(f"  files tested:   {len(results)}")
-    print(f"  accuracy:       {accuracy:.1f}%  ({correct}/{len(results)})")
-    print(f"  false accepts:  {false_accepts}  (NSFW that slipped through - dangerous)")
-    print(f"  false refuses:  {false_refuses}  (clean content wrongly blocked)")
+    print("PART 3 - per-agent average latency (isolated calls)")
+    for agent in sorted(agent_latency):
+        lat = agent_latency[agent]
+        print(f"  agent {agent:<10} avg {statistics.mean(lat) * 1000:7.0f} ms over {len(lat)} call(s)")
 
-    # ---- threshold sweep -------------------------------------------------
     print()
-    print("Threshold sweep (same scores, different cutoffs):")
-    print(f"  {'threshold':>9} {'accuracy':>9} {'false_acc':>10} {'false_ref':>10}")
-    for t in SWEEP_THRESHOLDS:
-        c, fa, fr = tally(t)
-        print(f"  {t:>9.2f} {100.0 * c / len(results):>8.1f}% {fa:>10} {fr:>10}")
-
-    # ---- latency ----------------------------------------------------------
-    lat = [r["latency_s"] for r in results]
-    img_lat = [r["latency_s"] for r in results if r["media_type"] == "image"]
-    vid_lat = [r["latency_s"] for r in results if r["media_type"] == "video"]
-    print()
-    print("Latency per moderate_ad() call (model already loaded):")
-    print(f"  average: {statistics.mean(lat) * 1000:.0f} ms   "
-          f"min: {min(lat) * 1000:.0f} ms   max: {max(lat) * 1000:.0f} ms")
-    if img_lat:
-        print(f"  images:  {statistics.mean(img_lat) * 1000:.0f} ms avg over {len(img_lat)}")
-    if vid_lat:
-        print(f"  videos:  {statistics.mean(vid_lat) * 1000:.0f} ms avg over {len(vid_lat)}")
-
-    # ---- verdict -----------------------------------------------------------
-    print()
-    if false_accepts == 0:
-        print(f"OVERALL: PASS - zero false accepts at threshold {args.threshold}")
-        return 0
-    print(f"OVERALL: FAIL - {false_accepts} false accept(s) at threshold {args.threshold}")
-    return 1
+    print(f"OVERALL: {'PASS' if all_ok else 'FAIL'}")
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":

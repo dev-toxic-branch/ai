@@ -1,0 +1,6 @@
+spaces
+torch
+transformers
+opencv-python-headless
+numpy
+tzdata
