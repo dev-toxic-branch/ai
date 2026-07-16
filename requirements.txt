@@ -1,0 +1,21 @@
+# Ad Serving Agent
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pymysql>=1.1.0
+cryptography>=41.0.0
+redis>=5.0.0
+numpy>=1.24.0
+
+# ML - CTR model (optional, install if training)
+# xgboost>=2.0.0
+# scikit-learn>=1.3.0
+
+# Moderation (existing)
+opencv-python>=4.8.0
+Pillow>=10.0.0
+transformers>=4.35.0
+torch>=2.0.0
+
+# Testing
+pytest>=7.4.0
+httpx>=0.25.0
